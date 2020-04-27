@@ -12,7 +12,7 @@
 # include <mpi.h>
 # endif
 
-# include "matrix.h"
+# include "matrix.hpp"
 
 using namespace std;
 

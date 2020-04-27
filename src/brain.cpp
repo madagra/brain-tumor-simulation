@@ -1,7 +1,7 @@
-#include "boost/algorithm/string.hpp"
-#include "boost/multi_array.hpp"
+#include <boost/algorithm/string.hpp>
+#include <boost/multi_array.hpp>
 
-# include "brain.h"
+# include "brain.hpp"
 
 
 BrainModel::BrainModel() {

@@ -4,8 +4,8 @@
 # include <sys/time.h>
 
 /* librerias locales */
-# include "matrix.h"
-# include "brain.h"
+# include "matrix.hpp"
+# include "brain.hpp"
 
 # define CONV_UP  1.0e-6  /* parametro de convergencia Jacobi */
 # define CONV_DO  1.0e2   /* parametro para chequear si Jacobi explota */

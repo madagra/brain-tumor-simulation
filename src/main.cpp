@@ -17,9 +17,9 @@
 # endif
 
 /* librerias locales */
-# include "brain.h"
-# include "matrix.h"
-# include "solver.h"
+# include "brain.hpp"
+# include "matrix.hpp"
+# include "solver.hpp"
 
 
 using namespace std;
