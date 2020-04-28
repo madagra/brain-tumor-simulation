@@ -1,142 +1,132 @@
 # include "solver.hpp"
 
-classSystem::classSystem() {
 
-  nx      = 181;
-  ny      = 217;
-  nz      = 181;
-  dim_tot = nx*ny*nz;
-  
-  /* asumiendo 4 procesadoras por default */
-  nx_loc  = nx/4;
-  nx_rest = nx%4;
-  
-  /* coefficientes de la matriz de Jacobi */
-  dim_coeffs = nx_loc*ny*nz;
-  coeffs = new double*[dim_coeffs]; 
-  for(int i = 0; i < dim_coeffs; i++) {
-    coeffs[i] = new double[s_order+1];
-    for( int j = 0; j <= s_order; j++) {
-      coeffs[i][j] = 0.0;
-    }
-  }
-  
-  init_time = 0.0;
-  linear_time = 0.0;
-  nonlinear_time = 0.0;
-
-  return;
-}
-
-classSystem::classSystem(const int nx_, const int ny_, const int nz_, 
-			 const int num_tasks, const int task_id, 
-			 const double dX_, const double dT_) {
+Solver::Solver(const int nx, const int ny, const int nz, 
+            const double dX, const double dT) {
  
-  nx = nx_;
-  ny = ny_;
-  nz = nz_;
-  
-  dT = dT_;
-  dX = dX_;
+    this->dT = dT;
+    this->dX = dX;
 
-  /* definicion de las dimensiones por cada proceso */
-  dim_tot  = nx*ny*nz;
-  dim_rest = (nx%num_tasks)*ny*nz;
-  nx_rest  = nx%num_tasks;
-  nx_loc   = nx/num_tasks;
+    this->initialize_dimensions(nx, ny, nz);
+
+    /* set Jacobi order and initialize coefficients */
+    s_order = 7;
+    dim_coeffs = nx_loc * ny * nz;
+
+    coeffs = new boost_array2d_t(boost::extents[dim_coeffs][s_order]);
+    std::fill_n((*coeffs).data(), (*coeffs).num_elements(), 0.0);
+
+    this->init_time = 0.0;
+    this->linear_time = 0.0;
+    this->nonlinear_time = 0.0;
+
+    return;
   
-  /* definicion de los indices locales de la grilla */
-# if defined _MPI
-  if(task_id < num_tasks - 1) {
-    is =  task_id*nx_loc;
-    ie = (task_id+1)*nx_loc;
-  }
-  else {
-    is = task_id*nx_loc;
-    ie = nx;
-    nx_loc += nx_rest;
-  }
-# else
-  is = 0;
-  ie = nx;
-# endif
-  
-  /* coefficientes de la matriz de Jacobi */
-  s_order = 7;
-  dim_coeffs = nx_loc*ny*nz;
-  coeffs = new double*[dim_coeffs]; 
-  for(int i = 0; i < dim_coeffs; i++) {
-    coeffs[i] = new double[s_order+1];
-    for( int j = 0; j <= s_order; j++) {
-      coeffs[i][j] = 0.0;
+}
+
+Solver::~Solver() {
+  delete coeffs;
+  return;
+}
+
+void Solver::initialize_dimensions(const int nx, const int ny, const int nz) {
+
+    # if defined _MPI
+        MPI_Comm_size(MPI_COMM_WORLD,&this->num_tasks);
+    # else
+        this->num_tasks = 1;
+    # endif
+
+    /* grid dimension for every parallel process */
+    this->dim_tot = nx*ny*nz;
+    this->dim_rest = (nx%this->num_tasks)*ny*nz;
+    this->nx_rest = nx%this->num_tasks;
+    this->nx_loc = nx/this->num_tasks;
+
+    /* full grid dimensions */
+    this->nx = nx;
+    this->ny = ny;
+    this->nz = nz;
+
+    return;
+}
+
+std::pair<int, int> Solver::get_local_indices(int task_id) {
+
+    int is, ie;
+
+    # if defined _MPI
+    if(task_id < this->num_tasks - 1) {
+        is =  task_id*nx_loc;
+        ie = (task_id+1)*nx_loc;
     }
-  }
-  
-  init_time = 0.0;
-  linear_time = 0.0;
-  nonlinear_time = 0.0;
-  
-  return;
-  
+    else {
+        is = task_id*this->nx_loc;
+        ie = this->nx;
+        this->nx_loc += this->nx_rest;
+    }
+    # else
+    is = 0;
+    ie = this->nx;
+    # endif   
+
+    return std::make_pair(is, ie);
 }
 
-classSystem::~classSystem() {
+void Solver::start(const int task_id, BrainModel& brain, const int method) {
   
-  for(int i = 0; i < dim_coeffs; i++)
-    delete[] coeffs[i]; 
-  
-  return;
-  
-}
-
-void classSystem::start(matrix3D *D, BrainModel *brain, const int method) {
-  
-    int i,j,k;
     double D_loc;
     int ind = 0;
-    double t_coeff = dT / (2.0 * pow(dX,2) );
+    double t_coeff = dT / (2.0 * pow(dX, 2) );
     double rho_;
+
+    int is, ie;
+    std::tie(is, ie) = this->get_local_indices(task_id);
 
     t_elap = gettimeofday(&tp, NULL);
     t1     = (double) tp.tv_sec+(1.e-6)*tp.tv_usec;
           
-    for(i = is; i < ie; i++) {
-      for(j = 1; j < ny-1; j++) {
-        for(k = 1; k < nz-1; k++) {    
-	  
-	  D_loc = D->get(i,j,k);
-          ind = (i-is)*ny*nz + j*nz + k;
+    for(int i = is; i < ie; i++) {
+        for(int j = 1; j < ny-1; j++) {
+            for(int k = 1; k < nz-1; k++) {    
+        
+                D_loc = (*brain.diffusion)[i][j][k];
+                ind = (i-is)*ny*nz + j*nz + k;
 
-	  if( D_loc > 0.0 ) {
-	    rho_ = brain->rho + brain->s - 1.0;
-	  } 
-          else {
-	    rho_ = 0.0;  
-          }
+                if( D_loc > 0.0 ) {
+                    rho_ = brain.rho + brain.s - 1.0;
+                } 
+                else {
+                    rho_ = 0.0;  
+                }
 	  
-	  if( i > 0 && i < nx - 1) {	
+                if( i > 0 && i < nx - 1) {
 
-            coeffs[ind][1] = t_coeff * ( D->get(i+1,j,k) + D_loc );
-	    coeffs[ind][2] = t_coeff * ( D->get(i-1,j,k) + D_loc );
-            coeffs[ind][3] = t_coeff * ( D->get(i,j+1,k) + D_loc );
-	    coeffs[ind][4] = t_coeff * ( D->get(i,j-1,k) + D_loc );
-            coeffs[ind][5] = t_coeff * ( D->get(i,j,k+1) + D_loc );
-	    coeffs[ind][6] = t_coeff * ( D->get(i,j,k-1) + D_loc );
-	    
-	    if(method == 0) {
-	      ++coeffs[ind][0]; /* 1.0 + */
-	      for(int jj = 1; jj < 7; jj++)
-	        coeffs[ind][0] += coeffs[ind][jj]; /* todos los otros coeficientes */
-	      }
-	    else if(method == 1) {
-	      ++coeffs[ind][0]; /* 1.0 + */
-	      for(int jj = 1; jj < 7; jj++)
-	        coeffs[ind][0] = coeffs[ind][0] - coeffs[ind][jj]; /* todos los otros coeficientes */
-	      coeffs[ind][7] = dT * rho_;
-	    }
-	  }	  
+                    (*coeffs)[ind][1] = t_coeff * ( (*brain.diffusion)[i+1][j][k] + D_loc );
+                    (*coeffs)[ind][2] = t_coeff * ( (*brain.diffusion)[i-1][j][k] + D_loc );
+                    (*coeffs)[ind][3] = t_coeff * ( (*brain.diffusion)[i][j+1][k] + D_loc );
+                    (*coeffs)[ind][4] = t_coeff * ( (*brain.diffusion)[i][j-1][k] + D_loc );
+                    (*coeffs)[ind][5] = t_coeff * ( (*brain.diffusion)[i][j][k+1] + D_loc );
+                    (*coeffs)[ind][6] = t_coeff * ( (*brain.diffusion)[i][j][k-1] + D_loc );
+
+                    if(method == 0) {
+                        (*coeffs)[ind][0] = 1.0; /* 1.0 + */
+                        for(int jj = 1; jj < 7; jj++) {
+                            /* all other coefficients */
+                            (*coeffs)[ind][0] = (*coeffs)[ind][0] + (*coeffs)[ind][jj]; 
+                        }
+                    }
+                    else if(method == 1) {
+                        (*coeffs)[ind][0] = 1.0; /* 1.0 + */
+                        for(int jj = 1; jj < 7; jj++) {
+                            /* all other coefficients */
+                            (*coeffs)[ind][0] = (*coeffs)[ind][0] - (*coeffs)[ind][jj];
+                        }
+                        (*coeffs)[ind][7] = dT * rho_;
+                    }
+                }	  
+            }
         }
-      }
     }
     
     t_elap = gettimeofday(&tp, NULL);
@@ -147,185 +137,185 @@ void classSystem::start(matrix3D *D, BrainModel *brain, const int method) {
 }
 
 
-void classSystem::lie_trotter(const double TIME, const int task_id, const int num_tasks,
-			      matrix3D *D, matrix3D *C, BrainModel *brain) {
+void Solver::lie_trotter(const double current_time, const int task_id,
+			      boost_array3d_t& D, boost_array3d_t& solution, BrainModel& brain) {
 
-  int ind = 0;
-  int iter = 0;
-  int i,j,k,i_loc;
-  double new_val;
+    int ind = 0;
+    int iter = 0;
+    int i, j, k, i_loc;
+    double new_val;
 
-  /* calculo de las normas */
-  double error   = 1.0;
-  double t_diff  = 0.0;
-  
-  /* matrizes para send/receives */
-  matrix2D before(ny,nz);
-  matrix2D after(ny,nz);
-  
-  /* solucion en iteracion de Jacobi */
-  matrix3D C_iter(nx_loc,ny,nz);
-  matrix3D C_iter_old(nx_loc,ny,nz);
-  
-  /* Lie-Trotter formula: parte lineal con Jacobi */
-  C_iter_old.copy(C);
-          
-  while(iter < ITER_MAX && error >= CONV_UP && error <= CONV_DO ) {
-      
-    after.init(0.0);
-    before.init(0.0);
-    t_diff = 0.0;
- 
-    t1 = 0.0; t2 = 0.0;
-    t_elap = gettimeofday(&tp, NULL);
-    t1     = (double) tp.tv_sec+(1.e-6)*tp.tv_usec;
+    /* compute norms */
+    double error   = 1.0;
+    double t_diff  = 0.0;
+
+    int is, ie;
+    std::tie(is, ie) = this->get_local_indices(task_id);
     
-    prepare_solution(task_id,num_tasks,nx_loc,ny,nz,&C_iter_old,&before,&after);
+    /* auxiliary matrices for parallel processes data exchange */
+    boost_array2d_t before(boost::extents[this->ny][this->nz]);
+    boost_array2d_t after(boost::extents[this->ny][this->nz]);
 
-# if defined _OMP
-    #pragma omp parallel for default(shared) private(i,j,k,new_val,ind,i_loc) \
-    schedule(static) collapse(3) reduction(+:t_diff)
-# endif      
-    for(i = is; i < ie; i++) {      
-      for(j = 1; j < ny-1; j++) {
-        for(k = 1; k < nz-1; k++) {
+    /* auxiliary variable to store intermediate solution of Jacobi method */
+    boost_array3d_t C_iter(boost::extents[this->nx_loc][this->ny][this->nz]);
+    boost_array3d_t C_iter_old(boost::extents[this->nx_loc][this->ny][this->nz]);
+  
+    /* Lie-Trotter formula: linear component solved with Jacobi */
+    C_iter_old = solution;
+         
+    while(iter < ITER_MAX && error >= CONV_UP && error <= CONV_DO ) {
+      
+        std::fill_n(before.data(), before.num_elements(), 0.0);        
+        std::fill_n(after.data(), after.num_elements(), 0.0);
+    
+        t_diff = 0.0;
+    
+        t1 = 0.0; t2 = 0.0;
+        t_elap = gettimeofday(&tp, NULL);
+        t1     = (double) tp.tv_sec+(1.e-6)*tp.tv_usec;
+        
+        // prepare_solution(task_id,num_tasks,nx_loc,ny,nz,&C_iter_old,&before,&after);
 
-	  ind = (i-is)*ny*nz + j*nz + k;
-          i_loc = i - is; 
+        // #pragma omp parallel for default(shared) private(i,j,k,new_val,ind,i_loc) \
+        // schedule(static) collapse(3) reduction(+:t_diff)
+        for(i = is; i < ie; i++) {      
+            for(j = 1; j < ny-1; j++) {
+                for(k = 1; k < nz-1; k++) {
+
+                    ind = (i-is)*ny*nz + j*nz + k;
+                    i_loc = i - is; 
+                    new_val = 0.0;
 	  
-	  if(i > 0 && i < nx-1) { /* afuera de los bordes */
+                    /* fixed-boundary conditions */
+	                if(i > 0 && i < nx-1) { 
 	  
-	     new_val = 0.0;
-	     
-# if defined _MPI
-            
-	    /* version paralela */
-	    
-            if(i == is) {
-	      new_val += C_iter_old.get(i_loc+1,j,k)*coeffs[ind][1] + 
-	      before.get(j,k)*coeffs[ind][2];
-	    }
-	    else if(i == ie-1) {
-	      new_val += after.get(j,k)*coeffs[ind][1] + 
-	      C_iter_old.get(i_loc-1,j,k)*coeffs[ind][2];
-	    }
-	    else {
-	      new_val += C_iter_old.get(i_loc+1,j,k)*coeffs[ind][1] + 
-	      C_iter_old.get(i_loc-1,j,k)*coeffs[ind][2];
-	    }
-	    
-	    new_val += C->get(i_loc,j,k) +
-	               C_iter_old.get(i_loc,j+1,k) * coeffs[ind][3] + 
-	               C_iter_old.get(i_loc,j-1,k) * coeffs[ind][4] +
-	               C_iter_old.get(i_loc,j,k+1) * coeffs[ind][5] + 
-	               C_iter_old.get(i_loc,j,k-1) * coeffs[ind][6];
-	    	    
-	    new_val = new_val/coeffs[ind][0];
-            C_iter.set(i_loc,j,k,new_val);
-	    t_diff += pow(C_iter.get(i_loc,j,k) - C_iter_old.get(i_loc,j,k),2);
-	      
-# else  
-	    /* version scalar */
-	    
-    	    new_val = ( C->get(i,j,k) +
-	                C_iter_old.get(i+1,j,k) * coeffs[ind][1] +
-	                C_iter_old.get(i-1,j,k) * coeffs[ind][2] +
-		        C_iter_old.get(i,j+1,k) * coeffs[ind][3] + 
-		        C_iter_old.get(i,j-1,k) * coeffs[ind][4] +
-                        C_iter_old.get(i,j,k+1) * coeffs[ind][5] + 
-                        C_iter_old.get(i,j,k-1) * coeffs[ind][6] ) / 
-                        coeffs[ind][0];
-	    	    
-            C_iter.set(i,j,k,new_val);
-	    t_diff += pow(C_iter.get(i,j,k) - C_iter_old.get(i,j,k),2);
+                        # if defined _MPI 
 
-# endif
-	    
-	    }
-	  }
+                        if(i == is) {
+                            new_val += C_iter_old.get(i_loc+1,j,k)*(*coeffs)[ind][1] + 
+                                before.get(j,k)*(*coeffs)[ind][2];
+                        }
+                        else if(i == ie-1) {
+                            new_val += after.get(j,k)*(*coeffs)[ind][1] + 
+                                C_iter_old.get(i_loc-1,j,k)*(*coeffs)[ind][2];
+                        }
+                        else {
+                            new_val += C_iter_old.get(i_loc+1,j,k)*(*coeffs)[ind][1] + 
+                                C_iter_old.get(i_loc-1,j,k)*(*coeffs)[ind][2];
+                        }
+                        
+                        new_val += C->get(i_loc,j,k) +
+                                C_iter_old.get(i_loc,j+1,k) * (*coeffs)[ind][3] + 
+                                C_iter_old.get(i_loc,j-1,k) * (*coeffs)[ind][4] +
+                                C_iter_old.get(i_loc,j,k+1) * (*coeffs)[ind][5] + 
+                                C_iter_old.get(i_loc,j,k-1) * (*coeffs)[ind][6];
+                                
+                        new_val /= (*coeffs)[ind][0];
+                        C_iter.set(i_loc,j,k,new_val);
+                        t_diff += pow(C_iter.get(i_loc,j,k) - C_iter_old.get(i_loc,j,k),2);
+                        # else
+
+                        new_val = ( solution[i][j][k] +
+                            C_iter_old[i+1][j][k] * (*coeffs)[ind][1] +
+                            C_iter_old[i-1][j][k] * (*coeffs)[ind][2] +
+                            C_iter_old[i][j+1][k] * (*coeffs)[ind][3] + 
+                            C_iter_old[i][j-1][k] * (*coeffs)[ind][4] +
+                            C_iter_old[i][j][k+1] * (*coeffs)[ind][5] + 
+                            C_iter_old[i][j][k-1] * (*coeffs)[ind][6] );
+                        new_val /= (*coeffs)[ind][0];
+
+                        C_iter[i][j][k] = new_val;
+                        t_diff += pow(C_iter[i][j][k] - C_iter_old[i][j][k],2);
+
+                        # endif
+                                
+                    }
+                }
+            }
         }
-      }
                   
-# if defined _MPI
-      MPI_Allreduce(&t_diff,&error,1,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
-      error = sqrt(error);
-# else
-      error = sqrt(t_diff);
-# endif    
-      C_iter_old.copy(&C_iter);
-      ++iter;
+        # if defined _MPI
+        MPI_Allreduce(&t_diff, &error, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        error = sqrt(error);
+        # else
+        error = sqrt(t_diff);
+        # endif
 
+        C_iter_old = C_iter;
+        ++iter;
     }
 
     t_elap = gettimeofday(&tp, NULL);
     t2     = (double) tp.tv_sec+(1.e-6)*tp.tv_usec;
     linear_time += t2 - t1;
         
-    /* Lie-Trotter formula: parte non lineal */
-    C_iter_old.copy(&C_iter);
-    C_iter.init(0.0);
+    /* Lie-Trotter formula: non-linear component */
+
+    C_iter_old = C_iter;
+    std::fill_n(C_iter.data(), C_iter.num_elements(), 0.0);
     
     t1 = 0.0; t2 = 0.0;
     t_elap = gettimeofday(&tp, NULL);
     t1     = (double) tp.tv_sec+(1.e-6)*tp.tv_usec;
     
     double rho_;
-# if defined _OMP
-    #pragma omp parallel for default(shared) private(i,j,k,rho_,i_loc,new_val) \
-    schedule(static) collapse(3)
-# endif    
-    for(i = is; i < ie; i++) {      
-      for(j = 1; j < ny-1; j++) {
-        for(k = 1; k < nz-1; k++) {
 
-	  i_loc = i - is;
-	  
-	  if( D->get(i,j,k) > 0.0 ) {
-	    if(TIME < brain->t_radio) {
-              rho_ = brain->rho;
-	    }
-	    else {
-	      rho_ = brain->rho - 1.0 + brain->s;
-	    }
-          } 
-          else {
-	     rho_ = 0.0;  
-          }
-          
-	  if(i > 0 && i < nx-1) { 
+    // #pragma omp parallel for default(shared) private(i,j,k,rho_,i_loc,new_val) \
+    // schedule(static) collapse(3)
+    for(i = is; i < ie; i++) {      
+        for(j = 1; j < ny-1; j++) {
+            for(k = 1; k < nz-1; k++) {
+
+                i_loc = i - is;
+    
+                if( (*brain.diffusion)[i][j][k] > 0.0 ) {
+                    if(current_time < brain.t_radio) {
+                        rho_ = brain.rho;
+                    }
+                    else {
+                        rho_ = brain.rho - 1.0 + brain.s;
+                    }
+                } 
+                else {
+                    rho_ = 0.0;  
+                }
+        
+                if(i > 0 && i < nx-1) { 
 # if defined _MPI
-	    if( C_iter_old.get(i_loc,j,k) > 0.0 ) {
-	       new_val = exp( log(C_iter_old.get(i_loc,j,k) ) * exp(-1.0*rho_*dT) );
-	       C_iter.set(i_loc,j,k,new_val);	      
-	    }
+                    if( C_iter_old.get(i_loc,j,k) > 0.0 ) {
+                        new_val = exp( log(C_iter_old.get(i_loc,j,k) ) * exp(-1.0*rho_*dT) );
+                        C_iter.set(i_loc,j,k,new_val);	      
+                    }
 # else
-	    if( C_iter_old.get(i,j,k) > 0.0 ) {
-	       new_val = exp( log(C_iter_old.get(i,j,k) ) * exp(-1.0*rho_*dT) );
-	       C_iter.set(i,j,k,new_val);	      
-	    }
-# endif
-	    
-	  }
-	}
-      }
+                    if( C_iter_old[i][j][k] > 0.0 ) {
+                        new_val = exp( log(C_iter_old[i][j][k] ) * exp(-1.0*rho_*dT) );
+                        C_iter[i_loc][j][k] = new_val;	      
+                    }
+# endif    
+                }
+            }
+        }
     } 
     
     t_elap = gettimeofday(&tp, NULL);
     t2     = (double) tp.tv_sec+(1.e-6)*tp.tv_usec;
     nonlinear_time += t2 - t1;
         
-    C->copy(&C_iter);
+    solution = C_iter;
     
     return;
 }
 
-void classSystem::expl(const int task_id, const int num_tasks,
+void Solver::expl(const int task_id, const int num_tasks,
 			 matrix3D *D, matrix3D *C, BrainModel *brain) {
 
   int ind = 0;
   int i,j,k,i_loc;
   double new_val;
   double eps = 0.00001;
+
+    int is, ie;
+    std::tie(is, ie) = this->get_local_indices(task_id);
 
   /* matrizes para send/receives */
   matrix2D before(ny,nz);
@@ -361,42 +351,42 @@ void classSystem::expl(const int task_id, const int num_tasks,
 	  /* version paralela */
 	    
           if(i == is) {
-	    new_val += C_iter_old.get(i_loc+1,j,k)*coeffs[ind][1] + 
-	    before.get(j,k)*coeffs[ind][2];
+	    new_val += C_iter_old.get(i_loc+1,j,k)*(*coeffs)[ind][1] + 
+	    before.get(j,k)*(*coeffs)[ind][2];
 	  }
 	  else if(i == ie-1) {
-	    new_val += after.get(j,k)*coeffs[ind][1] + 
-	    C_iter_old.get(i_loc-1,j,k)*coeffs[ind][2];
+	    new_val += after.get(j,k)*(*coeffs)[ind][1] + 
+	    C_iter_old.get(i_loc-1,j,k)*(*coeffs)[ind][2];
 	  }
 	  else {
-	    new_val += C_iter_old.get(i_loc+1,j,k)*coeffs[ind][1] + 
-	    C_iter_old.get(i_loc-1,j,k)*coeffs[ind][2];
+	    new_val += C_iter_old.get(i_loc+1,j,k)*(*coeffs)[ind][1] + 
+	    C_iter_old.get(i_loc-1,j,k)*(*coeffs)[ind][2];
 	  }
 	    
-	  new_val += C_iter_old.get(i_loc,j+1,k) * coeffs[ind][3] + 
-	             C_iter_old.get(i_loc,j-1,k) * coeffs[ind][4] +
-	             C_iter_old.get(i_loc,j,k+1) * coeffs[ind][5] + 
-	             C_iter_old.get(i_loc,j,k-1) * coeffs[ind][6];
+	  new_val += C_iter_old.get(i_loc,j+1,k) * (*coeffs)[ind][3] + 
+	             C_iter_old.get(i_loc,j-1,k) * (*coeffs)[ind][4] +
+	             C_iter_old.get(i_loc,j,k+1) * (*coeffs)[ind][5] + 
+	             C_iter_old.get(i_loc,j,k-1) * (*coeffs)[ind][6];
 	  
-          new_val += C_iter_old.get(i_loc,j,k) * coeffs[ind][0] -
+          new_val += C_iter_old.get(i_loc,j,k) * (*coeffs)[ind][0] -
                      C_iter_old.get(i_loc,j,k) * log( sqrt( pow(C_iter_old.get(i_loc,j,k),2) + eps ) ) 
-		     * coeffs[ind][7];  	    
+		     * (*coeffs)[ind][7];  	    
 		     
           C_iter.set(i_loc,j,k,new_val);
 	      
 # else  
 	  /* version scalar */
 
-	  new_val += C_iter_old.get(i+1,j,k) * coeffs[ind][1] + 
-	             C_iter_old.get(i-1,j,k) * coeffs[ind][2] + 
-	             C_iter_old.get(i,j+1,k) * coeffs[ind][3] + 
-	             C_iter_old.get(i,j-1,k) * coeffs[ind][4] +
-	             C_iter_old.get(i,j,k+1) * coeffs[ind][5] + 
-	             C_iter_old.get(i,j,k-1) * coeffs[ind][6];
+	  new_val += C_iter_old.get(i+1,j,k) * (*coeffs)[ind][1] + 
+	             C_iter_old.get(i-1,j,k) * (*coeffs)[ind][2] + 
+	             C_iter_old.get(i,j+1,k) * (*coeffs)[ind][3] + 
+	             C_iter_old.get(i,j-1,k) * (*coeffs)[ind][4] +
+	             C_iter_old.get(i,j,k+1) * (*coeffs)[ind][5] + 
+	             C_iter_old.get(i,j,k-1) * (*coeffs)[ind][6];
 	  
-          new_val += C_iter_old.get(i,j,k) * coeffs[ind][0] -
+          new_val += C_iter_old.get(i,j,k) * (*coeffs)[ind][0] -
                      C_iter_old.get(i,j,k) * log( sqrt( pow(C_iter_old.get(i,j,k),2) + eps ) ) 
-		     * coeffs[ind][7];  	    
+		     * (*coeffs)[ind][7];  	    
 
           C_iter.set(i,j,k,new_val);
 
@@ -412,7 +402,7 @@ void classSystem::expl(const int task_id, const int num_tasks,
 }
 
 
-void classSystem::prepare_solution(const int task_id, const int num_tasks, 
+void Solver::prepare_solution(const int task_id, const int num_tasks, 
 				   const int nx_local, const int ny, const int nz, 
 				   matrix3D *C, matrix2D *before, matrix2D *after) {
 

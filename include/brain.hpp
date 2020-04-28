@@ -8,10 +8,6 @@
 # include <string>
 # include <vector>  
 
-# if defined _MPI
-# include <mpi.h>
-# endif
-
 # include "matrix.hpp"
 
 using namespace std;
@@ -58,6 +54,9 @@ public:
     double beta;
     double s;
 
+    /* diffusion coefficients */
+    boost_array3d_t *diffusion;
+
     /* Constructors */
     BrainModel();
 
@@ -71,17 +70,14 @@ public:
                const int, 
                const double);
 
+    ~BrainModel();
+    
     /* methods */
-    void read(matrix3D *, 
-              int&, 
-              int&, 
-              int&, 
-              const int);
+    void read();
 
-    void init_tumor(const int, 
-                    matrix3D *, 
-                    const int, 
-                    const int);
+    boost_array3d_t init_tumor(const int, 
+                        const int,
+                        const int);
 
     double norm_tumor(const int, 
                       const int, 

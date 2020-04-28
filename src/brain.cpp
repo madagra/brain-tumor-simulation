@@ -3,46 +3,47 @@
 
 # include "brain.hpp"
 
-
 BrainModel::BrainModel() {
   
- /* Valores predefinidos del modelo */
- Cm      = 1.*pow(10,8);
- rho     = 0.107; 
- D_white = 0.255;
- D_grey  = 0.051;
- dose    = 1.8;
- alpha   = 0.036;
- beta    = 0.0036;
- s = exp( -alpha*dose -beta*pow(dose,2) );
- t_radio = 15.0;
+    /* default values of model constants */
+    Cm      = 1.0;
+    rho     = 0.107; 
+    D_white = 0.255;
+    D_grey  = 0.051;
+    dose    = 1.8;
+    alpha   = 0.036;
+    beta    = 0.0036;
+    s = exp( -alpha*dose -beta*pow(dose,2) );
+    t_radio = 15.0;
 
  /* define the initial position and size of the tumor */
 # if defined TEST
- tumor_size = 5;
- tumor_position[0] = 3; 
- tumor_position[1] = 3; 
- tumor_position[2] = 3;
- fname = "diffusion_test.csv";
+    tumor_size = 5;
+    tumor_position[0] = 15; 
+    tumor_position[1] = 15; 
+    tumor_position[2] = 15;
+    fname = "diffusion_test.csv";
 # else
- tumor_size = 30;
- tumor_position[0] = 30; 
- tumor_position[1] = 93; 
- tumor_position[2] = 30;
- fname = "diffusion.csv";
+    tumor_size = 30;
+    tumor_position[0] = 30; 
+    tumor_position[1] = 93; 
+    tumor_position[2] = 30;
+    fname = "diffusion.csv";
 # endif
 }
   
-BrainModel::BrainModel(const double Cm, 
-                       const double rho, 
-	                     const double D_white, 
-                       const double D_grey,
-	                     const double alpha, 
-                       const double beta, 
-                       const double dose,
-	                     const int tumor_size, 
-                       const double t_radio) 
+BrainModel::BrainModel(
+                    const double Cm, 
+                    const double rho, 
+                    const double D_white, 
+                    const double D_grey,
+                    const double alpha, 
+                    const double beta, 
+                    const double dose,
+                    const int tumor_size, 
+                    const double t_radio) : BrainModel::BrainModel()
 {
+
     this->Cm = Cm; 
     this->rho = rho;
     this->D_white = D_white;
@@ -52,115 +53,101 @@ BrainModel::BrainModel(const double Cm,
     this->beta = beta;
     this->s = exp( -alpha*dose -beta*pow(dose,2) );
     this->t_radio = t_radio;
-
     this->tumor_size = tumor_size;
-    tumor_position[0] = 30; 
-    tumor_position[1] = 93; 
-    tumor_position[2] = 30;
+    
+}
 
+BrainModel::~BrainModel() {
+    delete this->diffusion;
 }
   
 /* read input diffusion coefficients and populates current brain model */
-void BrainModel::read( matrix3D *D, 
-                       int &nx, 
-                       int &ny, 
-                       int &nz, 
-                       const int my_id) 
+void BrainModel::read() 
 {
   
     std::ifstream f;
     std::string line;
 
-    nx = 0; 
-    ny = 0; 
-    nz = 0;
+    int nx = 0; 
+    int ny = 0; 
+    int nz = 0;
     std::vector<double> t_D; 
 
-    if( my_id == 0) {
-
-        f.open(fname, std::ifstream::in);
-        if( !f.is_open() ) {
+    f.open(fname, std::ifstream::in);
+    if( !f.is_open() ) {
         std::cout << " Error opening input file " << std::endl;
         std::cout << " The program will not work! " << std::endl;
-        # if defined _MPI
-            MPI_Finalize();
-        # endif
-            exit(EXIT_FAILURE);        
+        exit(EXIT_FAILURE);        
+    }
+        
+    std::getline(f, line);  /* read the heading */
+    while( std::getline(f, line) ) {        
+
+        std::vector<std::string> result;
+        boost::algorithm::split(result, line, boost::is_any_of(","));
+
+        nx = max(nx, std::stoi(result[0]));
+        ny = max(ny, std::stoi(result[1]));
+        nz = max(nz, std::stoi(result[2]));
+        int D_read = std::stoi(result[3]);
+
+        if(D_read >= this->is_white.first && D_read <= this->is_white.second) {
+            t_D.push_back(D_white);
         }
-            
-        std::getline(f, line);  /* read the heading */
-        while( std::getline(f, line) ) {        
-
-            std::vector<std::string> result;
-            boost::algorithm::split(result, line, boost::is_any_of(","));
-
-            nx = max(nx, std::stoi(result[0]));
-            ny = max(ny, std::stoi(result[1]));
-            nz = max(nz, std::stoi(result[2]));
-            int D_read = std::stoi(result[3]);
-
-            if(D_read >= this->is_white.first && D_read <= this->is_white.second) {
-                t_D.push_back(D_white);
-            }
-            else if(D_read >= this->is_grey.first && D_read < this->is_grey.second) {
-                t_D.push_back(D_grey);
-            }
-            else {
-                t_D.push_back(0.0);
-            }
-
+        else if(D_read >= this->is_grey.first && D_read < this->is_grey.second) {
+            t_D.push_back(D_grey);
         }
-        f.close();
-    }  
-  
-  /* creacion del vector de coeficientes de difusion para todos los procecos */
-    D->reset_dimension(nx,ny,nz);
-  
+        else {
+            t_D.push_back(0.0);
+        }
+
+    }
+    f.close();
+    
+    /* create diffusion coefficient matrix with the values read from input */
     int ind = 0;
-    if(my_id == 0) {
-        for(int i = 0; i < nx; i++) {
-            for(int j = 0; j < ny; j++) {
-                for(int k = 0; k < nz; k++) {
-                    D->set(i,j,k,t_D[ind]);
-                    ++ind;
+    this->diffusion = new boost_array3d_t(boost::extents[nx][ny][nz]);
+    const auto sup(this->diffusion->data() + this->diffusion->num_elements());
+    for (auto it = this->diffusion->data(); it != sup; ++it) {
+        *it = t_D[ind];
+        ++ind;
+    }
+  
+    return;
+ }
+  
+ boost_array3d_t BrainModel::init_tumor(const int nx, const int ny, const int nz) {
+   
+    /* initial dimensions and diffusion coefficient value 
+     * for the tumor area */    
+    double init_value = Cm/2.0;
+    int dim = tumor_size;
+    double radius = dim/2.0;
+
+    /* initial tumor positions */
+    int i_start = tumor_position[0];
+    int j_start = tumor_position[1];
+    int k_start = tumor_position[2];
+      
+    boost_array3d_t coeffs(boost::extents[nx][ny][nz]);
+    
+    for(int i = 0; i < nx; i++) {        
+        for(int j = j_start - radius ;j <= j_start + radius; j++) {
+            for(int k = k_start - radius;k <= k_start + radius; k++) {
+                
+                double ix = (double) i-i_start;
+                double iy = (double) j-j_start;
+                double iz = (double) k-k_start;
+
+                if(i >= i_start - radius && i <= i_start + radius) {     
+                    if( sqrt( pow(ix,2) + pow(iy,2) + pow(iz,2) ) < radius )
+                        coeffs[i][j][k] = init_value;
                 }
             }
         }
     }
-  
-    return;
-  
- }
-  
- void BrainModel::init_tumor(const int task_id, matrix3D *C, const int is, const int ie) {
-   
-   int i,j,k;
-   double init_value = Cm/2.0;
-   int i_start = tumor_position[0];
-   int j_start = tumor_position[1];
-   int k_start = tumor_position[2];
-   int dim     = tumor_size;
-   double radius = dim/2.0;
       
-   for(i = is; i < ie; i++) {
-     int i_loc = i - is;
-     for(j = j_start - radius ;j <= j_start + radius; j++) {
-       for(k = k_start - radius;k <= k_start + radius; k++) {
-
-	 double ix = (double) i-i_start;
-	 double iy = (double) j-j_start;
-         double iz = (double) k-k_start;
-
-	 if(i >= i_start - radius && i <= i_start + radius) {     
-	   	   
-	    if( sqrt( pow(ix,2) + pow(iy,2) + pow(iz,2) ) < radius )
-	      C->set(i_loc,j,k,init_value);
-         }
-       }
-     }
-   }
-      
-   return;
+   return coeffs;
  }
  
  double BrainModel::norm_tumor(const int is, const int ie, matrix3D *C) {
