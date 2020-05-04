@@ -16,6 +16,20 @@
 # if not defined SOLVER_H
 # define SOLVER_H
 
+/* hold grid dimensions and indexes for both serial and
+ * parallel cases */
+struct dimensions_t {
+    int total;
+    int local;
+    int rest;
+    int nx_rest;
+    int nx_local;
+    std::pair<int, int> local_i;
+    int start_i;
+    int end_i;
+};
+
+
 class Solver {
   
 private:
@@ -25,10 +39,7 @@ private:
 
     /* discrete grid dimensions */
     int nx,ny,nz;
-    int nx_loc;
-    int dim_tot;
-    int dim_rest;
-    int nx_rest;
+    dimensions_t dims;
 
     /* Jacobi matrix coefficients */
     boost_array2d_t *coeffs;
@@ -44,15 +55,9 @@ private:
     int t_elap;
     double t1, t2;
 
-    /* initialize dimensions in the serial and parallel cases */
-    void initialize_dimensions(const int nx, const int ny, const int nz);
-
-    /* get starting/ending indices on the full grid depending on the current rank */
-    std::pair<int, int> get_local_indices(const int task_id);
-
     /* preparar vectores *after y *before */
-    void prepare_solution(const int, const int , const int, const int, const int,
-            matrix3D *, matrix2D *, matrix2D *);
+    void prepare_solution(const int, const int,
+            boost_array3d_t& solution, boost_array2d_t& before, boost_array2d_t& after);
   
 public:
   
@@ -65,18 +70,21 @@ public:
     const double dX, const double dT);
   
   ~Solver();
+
+  static dimensions_t get_local_dimensions(const int nx, const int ny, const int nz);
   
-  /* initializacion parte lineal Lie-Trotter o explicito */
+  /* solver initialization */
   void start(const int task_id, BrainModel& brain, const int method);
   
-  /* solucion del sistema */
+  
+  /* solution methods */
   void lie_trotter(const double current_time, 
                 const int task_id, 
-                boost_array3d_t&, 
-                boost_array3d_t&,
-                BrainModel&);
+                boost_array3d_t& solution,
+                BrainModel& brain_model);
 
-  void expl(const int, const int, matrix3D *, matrix3D *, BrainModel *);
+  void expl(const int task_id, const int num_tasks,
+            boost_array3d_t& solution, BrainModel& brain);
 
 };
 

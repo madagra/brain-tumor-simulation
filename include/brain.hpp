@@ -75,13 +75,13 @@ public:
     /* methods */
     void read();
 
-    boost_array3d_t init_tumor(const int, 
-                        const int,
-                        const int);
+    boost_array3d_t init_tumor(const int nx, 
+                        const int ny,
+                        const int nz);
 
-    double norm_tumor(const int, 
-                      const int, 
-                      matrix3D *);
+    double norm_tumor(const int is, 
+                      const int ie, 
+                      boost_array3d_t& data);
 
 };
 

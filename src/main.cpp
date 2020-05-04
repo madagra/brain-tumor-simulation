@@ -5,6 +5,7 @@
 # include <sys/types.h>
 # include <sys/stat.h>
 # include <sys/time.h>
+#include <errno.h>
 # include <omp.h>
 
 # include "brain.hpp"
@@ -22,37 +23,24 @@ int num_threads;
 int provided;
 int required;
 
-/* arrays to hold the solution of the equation */
+/* array to hold the solution of the equation */
 boost_array3d_t solution;
-double *Ct, *p_Ct;
+std::string solution_folder = "./solution";
 
-/* coefficiente de difusion */
-matrix3D D;
-
-/* dimensiones del problema */
-int dim_tot;
-int dim_local;
-int dim_rest;
+/* grid dimensions */
 int nx, ny, nz;
-int nx_local,nx_rest;
 
-/* direcciones de la grilla por cada procesadora */
-int is;
-int ie;
-
-/* parametros de metodo iterativo */
-double dX = 1.0;
-double dT = 0.0001;
-double total_time = 30.0;
-int dump = 20;
-int method = 0;
+/* input parameters */
+double dX, dT;
+double total_time;
+int dump;
+int method;
 
 int main( int argc, char *argv[] ) {
   
     double t_radio_ = 0.0;
-    ostringstream fname;
+    std::ostringstream fname;
 
-    /* medir los tiempos */
     struct timeval tp;
     int t_elap;
     double t1,t2;
@@ -79,45 +67,33 @@ int main( int argc, char *argv[] ) {
     
     /* radiotherapy starting time step */
     brain_model.t_radio = t_radio_;
+
+    /* folder to hold the partial solutions */
+    int status_mkdir = mkdir(solution_folder.c_str(), S_IRWXU | S_IRWXG);
+    if (0 != status_mkdir && errno != EEXIST) {
+        std::cout << " Cannot create directory to store partial solutions" << std::endl;
+        status_mkdir = -1;
+    } else {
+        status_mkdir = 0;
+    }
     
     /* initialize the brain model with default parameters
     * and read the diffusion coefficients matrix */
 
     brain_model.read();
+
+    print_array_slice((*brain_model.diffusion), solution_folder + "/diffusion_slice.csv", 30);
     nx = (*brain_model.diffusion).shape()[0];
     ny = (*brain_model.diffusion).shape()[1];
     nz = (*brain_model.diffusion).shape()[2];
 
-    double norma = l2_norm((*brain_model.diffusion));
-
-    cout << " Spacial dimension of the grid defining the brain: " << nx << " " << ny << " " 
-    << nz << " " << dim_tot << " " << dim_rest << endl;
-    cout << " Write solution every " << dump << " steps" << endl;
+    std::cout << " Dimensions of the spacial grid: " << nx << " " << ny << " " << nz << std::endl;
+    std::cout << " Write solution every " << dump << " steps" << std::endl;
     if(method == 0) 
-        cout << " Starting Lie-Trotter solver " << endl;
+        std::cout << " Starting Lie-Trotter solver " << std::endl;
     else if(method == 1) 
-        cout << " Starting explicit solver " << endl;
+        std::cout << " Starting explicit solver " << std::endl;
 
-    // fname.str("");
-    // fname.clear();
-    // fname << "./slice_brain.vtk";
-    // print_vtk(brain, fname.str().c_str(), 30);
-    
-    /* definicion de las dimensiones por cada proceso */
-    dim_tot   = nx*ny*nz;
-    dim_local = (nx/num_tasks)*ny*nz;
-    dim_rest  = (nx%num_tasks)*ny*nz;
-    nx_rest   = nx%num_tasks;
-    nx_local  = nx/num_tasks;
-  
-    /* initialize tumor area */  
-    is = 0;
-    ie = nx;
-    // C.reset_dimension(nx_local,ny,nz);
-
-
-    // TODO use a smart pointer for the solution array as below
-    // std::unique_ptr<boost_array3d_t> solution(new boost_array2d_t(boost::extents[nx][ny][nz]));
     boost_array3d_t solution(boost::extents[nx][ny][nz]);
     solution = brain_model.init_tumor(nx, ny, nz);
 
@@ -128,22 +104,10 @@ int main( int argc, char *argv[] ) {
     Solver solver(nx, ny, nz, dX, dT);
     solver.start(task_id, brain_model, method);
 
-    /* hold the partial solution for later visualizion of the tumor spread */
-    std::vector<double> Ct_ = std::vector<double>(dim_tot, 0.0);
-    int status = mkdir("./solution", S_IRWXU | S_IRWXG);	  
-
-    Ct = new double[dim_tot];
-    for(int i = 0; i < dim_tot; i++)
-        Ct[i] = 0.0;
-    
     int i_dump = 0;
-    double norm   = 0.0;
-    double t_norm = 0.0;
     bool radio_active = false;
-    
     double simulation_time = 0.0;
 
-    
     int t  = 0;
     while(t < total_time/dT) {
     
@@ -160,10 +124,10 @@ int main( int argc, char *argv[] ) {
         
         // solve the system of equation at current time
         if(method == 0) {
-            solver.lie_trotter(current, task_id, *brain_model.diffusion, solution, brain_model);
+            solver.lie_trotter(current, task_id, solution, brain_model);
         }
         else if(method == 1) {
-            // solver.expl(task_id,num_tasks,&D,&C, &brain_model);
+            solver.expl(task_id,num_tasks, solution, brain_model);
         }
 
         t_elap = gettimeofday(&tp, NULL);
@@ -174,36 +138,29 @@ int main( int argc, char *argv[] ) {
             << " at time " << current + dT << " = " << l2_norm(solution) 
             << " (" << sum_elements(solution) << ")" << std::endl;
                
-        if( t % dump == 0 && t > 0) {  
-            // C.fill(Ct);
+        if( t % dump == 0 && status_mkdir == 0) {  
             fname.str("");
             fname.clear();
-            fname << "./solution/concentration_plane" << i_dump << ".vtk";
+            fname << solution_folder <<"/slice_" << i_dump << ".csv";
             std::cout << " Printing intermediate solution at: " << fname.str().c_str() << std::endl;
-            // print_vtk(Ct,fname.str().c_str(),30);
+            print_array_slice(solution, fname.str().c_str(), 30);
             ++i_dump;
         }
 
-        // go to the next time step
+        // advance to the next time step
         ++t;
     }
-
-    return 0;
-  
+ 
     int simulation_time_;
     simulation_time_ = simulation_time;
 
     cout << " \n TIMING \n ";
-    cout << setprecision(6) << fixed << " Tiempo initializacion = " << solver.init_time << endl;
-    cout << setprecision(6) << fixed << "  Tiempo solucion del sistema = " << simulation_time << endl;
+    cout << setprecision(6) << fixed << " Initialization time = " << solver.init_time << " s" << endl;
+    cout << setprecision(6) << fixed << "  Solver time = " << simulation_time  << " s" << endl;
     if(method == 0) {
-        cout << setprecision(6) << fixed << " Tiempo medio parte linear = " << solver.linear_time << endl;
-        cout << setprecision(6) << fixed << " Tiempo medio parte non linear = " << solver.nonlinear_time << endl;
+        cout << setprecision(6) << fixed << " Average time Lie-Trotter linear part = " << solver.linear_time << " s" << endl;
+        cout << setprecision(6) << fixed << " Average time Lie-Trotter non-linear part = " << solver.nonlinear_time << " s" << endl;
     }
-   
-    if(task_id == 0)
-        delete[] Ct;
     
-    return 0;
-  
+    return EXIT_SUCCESS;
 }

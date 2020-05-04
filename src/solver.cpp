@@ -4,73 +4,68 @@
 Solver::Solver(const int nx, const int ny, const int nz, 
             const double dX, const double dT) {
  
+    /* time and space steps */
     this->dT = dT;
     this->dX = dX;
-
-    this->initialize_dimensions(nx, ny, nz);
-
-    /* set Jacobi order and initialize coefficients */
-    s_order = 7;
-    dim_coeffs = nx_loc * ny * nz;
-
-    coeffs = new boost_array2d_t(boost::extents[dim_coeffs][s_order]);
-    std::fill_n((*coeffs).data(), (*coeffs).num_elements(), 0.0);
-
-    this->init_time = 0.0;
-    this->linear_time = 0.0;
-    this->nonlinear_time = 0.0;
-
-    return;
-  
-}
-
-Solver::~Solver() {
-  delete coeffs;
-  return;
-}
-
-void Solver::initialize_dimensions(const int nx, const int ny, const int nz) {
-
-    # if defined _MPI
-        MPI_Comm_size(MPI_COMM_WORLD,&this->num_tasks);
-    # else
-        this->num_tasks = 1;
-    # endif
-
-    /* grid dimension for every parallel process */
-    this->dim_tot = nx*ny*nz;
-    this->dim_rest = (nx%this->num_tasks)*ny*nz;
-    this->nx_rest = nx%this->num_tasks;
-    this->nx_loc = nx/this->num_tasks;
-
+    
     /* full grid dimensions */
     this->nx = nx;
     this->ny = ny;
     this->nz = nz;
 
-    return;
+    /* local grid dimensions and indices */
+    this->dims = Solver::get_local_dimensions(nx, ny, nz);
+
+    /* set Jacobi order and initialize coefficients */
+    s_order = 7;
+    dim_coeffs = this->dims.nx_local * ny * nz;
+    coeffs = new boost_array2d_t(boost::extents[dim_coeffs][s_order]);
+    std::fill_n((*coeffs).data(), (*coeffs).num_elements(), 0.0);
+
+    /* keep track of elapsed times */
+    this->init_time = 0.0;
+    this->linear_time = 0.0;
+    this->nonlinear_time = 0.0;
+  
 }
 
-std::pair<int, int> Solver::get_local_indices(int task_id) {
+Solver::~Solver() {
+  delete coeffs;
+}
 
-    int is, ie;
+dimensions_t Solver::get_local_dimensions(int nx, int ny, int nz) {
 
-    # if defined _MPI
-    if(task_id < this->num_tasks - 1) {
-        is =  task_id*nx_loc;
-        ie = (task_id+1)*nx_loc;
+    int num_tasks;
+    int task_id;
+    dimensions_t dims;
+
+# if defined _MPI
+    MPI_Comm_size(MPI_COMM_WORLD,&num_tasks);
+    MPI_Comm_rank(MPI_COMM_WORLD,&task_id);
+# else
+    num_tasks = 1;
+    task_id = 0;
+# endif
+
+    /* local dimensions and indices */
+    dims.total = nx * ny * nz;
+    dims.local = (nx / num_tasks) * ny * nz;
+    dims.rest  = (nx % num_tasks) * ny * nz;
+    dims.nx_rest   = nx % num_tasks;
+    dims.nx_local  = nx / num_tasks;   
+
+    int start_i, end_i;
+    if(task_id < num_tasks - 1) {
+        start_i =  task_id * dims.nx_local;
+        end_i = (task_id+1) * dims.nx_local;
     }
     else {
-        is = task_id*this->nx_loc;
-        ie = this->nx;
-        this->nx_loc += this->nx_rest;
+        start_i = task_id * dims.nx_local;
+        end_i = nx;
     }
-    # else
-    is = 0;
-    ie = this->nx;
-    # endif   
+    dims.local_i = std::make_pair(start_i, end_i);
 
-    return std::make_pair(is, ie);
+    return dims;
 }
 
 void Solver::start(const int task_id, BrainModel& brain, const int method) {
@@ -81,7 +76,7 @@ void Solver::start(const int task_id, BrainModel& brain, const int method) {
     double rho_;
 
     int is, ie;
-    std::tie(is, ie) = this->get_local_indices(task_id);
+    std::tie(is, ie) = this->dims.local_i;
 
     t_elap = gettimeofday(&tp, NULL);
     t1     = (double) tp.tv_sec+(1.e-6)*tp.tv_usec;
@@ -138,7 +133,7 @@ void Solver::start(const int task_id, BrainModel& brain, const int method) {
 
 
 void Solver::lie_trotter(const double current_time, const int task_id,
-			      boost_array3d_t& D, boost_array3d_t& solution, BrainModel& brain) {
+                            boost_array3d_t& solution, BrainModel& brain) {
 
     int ind = 0;
     int iter = 0;
@@ -150,15 +145,15 @@ void Solver::lie_trotter(const double current_time, const int task_id,
     double t_diff  = 0.0;
 
     int is, ie;
-    std::tie(is, ie) = this->get_local_indices(task_id);
+    std::tie(is, ie) = this->dims.local_i;
     
     /* auxiliary matrices for parallel processes data exchange */
     boost_array2d_t before(boost::extents[this->ny][this->nz]);
     boost_array2d_t after(boost::extents[this->ny][this->nz]);
 
     /* auxiliary variable to store intermediate solution of Jacobi method */
-    boost_array3d_t C_iter(boost::extents[this->nx_loc][this->ny][this->nz]);
-    boost_array3d_t C_iter_old(boost::extents[this->nx_loc][this->ny][this->nz]);
+    boost_array3d_t C_iter(boost::extents[this->dims.nx_local][this->ny][this->nz]);
+    boost_array3d_t C_iter_old(boost::extents[this->dims.nx_local][this->ny][this->nz]);
   
     /* Lie-Trotter formula: linear component solved with Jacobi */
     C_iter_old = solution;
@@ -174,10 +169,12 @@ void Solver::lie_trotter(const double current_time, const int task_id,
         t_elap = gettimeofday(&tp, NULL);
         t1     = (double) tp.tv_sec+(1.e-6)*tp.tv_usec;
         
-        // prepare_solution(task_id,num_tasks,nx_loc,ny,nz,&C_iter_old,&before,&after);
+# if defined _MPI        
+        prepare_solution(task_id,num_tasks,nx_loc,ny,nz,&C_iter_old,&before,&after);
+# endif
 
-        // #pragma omp parallel for default(shared) private(i,j,k,new_val,ind,i_loc) \
-        // schedule(static) collapse(3) reduction(+:t_diff)
+        #pragma omp parallel for default(shared) private(i,j,k,new_val,ind,i_loc) \
+        schedule(static) collapse(3) reduction(+:t_diff)
         for(i = is; i < ie; i++) {      
             for(j = 1; j < ny-1; j++) {
                 for(k = 1; k < nz-1; k++) {
@@ -260,8 +257,8 @@ void Solver::lie_trotter(const double current_time, const int task_id,
     
     double rho_;
 
-    // #pragma omp parallel for default(shared) private(i,j,k,rho_,i_loc,new_val) \
-    // schedule(static) collapse(3)
+    #pragma omp parallel for default(shared) private(i,j,k,rho_,i_loc,new_val) \
+    schedule(static) collapse(3)
     for(i = is; i < ie; i++) {      
         for(j = 1; j < ny-1; j++) {
             for(k = 1; k < nz-1; k++) {
@@ -302,109 +299,100 @@ void Solver::lie_trotter(const double current_time, const int task_id,
     nonlinear_time += t2 - t1;
         
     solution = C_iter;
-    
-    return;
 }
 
 void Solver::expl(const int task_id, const int num_tasks,
-			 matrix3D *D, matrix3D *C, BrainModel *brain) {
+			 boost_array3d_t& solution, BrainModel& brain) {
 
-  int ind = 0;
-  int i,j,k,i_loc;
-  double new_val;
-  double eps = 0.00001;
-
+    int ind = 0;
+    int i,j,k,i_loc;
+    double new_val;
+    double eps = 0.00001;
     int is, ie;
-    std::tie(is, ie) = this->get_local_indices(task_id);
+    std::tie(is, ie) = this->dims.local_i;
 
-  /* matrizes para send/receives */
-  matrix2D before(ny,nz);
-  matrix2D after(ny,nz);
+    /* auxiliary matrices for parallel processes data exchange */
+    boost_array2d_t before(boost::extents[this->ny][this->nz]);
+    boost_array2d_t after(boost::extents[this->ny][this->nz]);
+
+    /* auxiliary variable to store intermediate solution of Jacobi method */
+    boost_array3d_t C_iter(boost::extents[this->dims.nx_local][this->ny][this->nz]);
+    boost_array3d_t C_iter_old(boost::extents[this->dims.nx_local][this->ny][this->nz]);
   
-  /* solucion en iteracion de Jacobi */
-  matrix3D C_iter(nx_loc,ny,nz);
-  matrix3D C_iter_old(nx_loc,ny,nz);
-  
-  C_iter_old.copy(C);
-                
-  after.init(0.0);
-  before.init(0.0);
-  
-  prepare_solution(task_id,num_tasks,nx_loc,ny,nz,&C_iter_old,&before,&after);
-  
-# if defined _OMP
-  #pragma omp parallel for default(shared) private(i,j,k,new_val,ind,i_loc) schedule(static) collapse(3)
-# endif   
-  for(i = is; i < ie; i++) {
-    for(j = 1; j < ny-1; j++) {
-      for(k = 1; k < nz-1; k++) {
-	
-        ind = (i-is)*ny*nz + j*nz + k;
-        i_loc = i - is; 
-	
-        if(i > 0 && i < nx-1) { /* afuera de los bordes */
+    C_iter_old = solution;
+                    
+    std::fill_n(before.data(), before.num_elements(), 0.0);        
+    std::fill_n(after.data(), after.num_elements(), 0.0);
+    
+# if defined _MPI
+    prepare_solution(task_id,num_tasks,this->dims.nx_local,ny,nz,&C_iter_old,&before,&after);
+# endif
+
+    #pragma omp parallel for default(shared) private(i,j,k,new_val,ind,i_loc) \
+    schedule(static) collapse(3)
+    for(i = is; i < ie; i++) {
+        for(j = 1; j < ny-1; j++) {
+            for(k = 1; k < nz-1; k++) {
+        
+                ind = (i-is)*ny*nz + j*nz + k;
+                i_loc = i - is; 
+        
+                if(i > 0 && i < nx-1) { /* afuera de los bordes */
 	  
-	  new_val = 0.0;
+	                new_val = 0.0;
 	  
 # if defined _MPI
             
-	  /* version paralela */
+	                /* version paralela */
 	    
-          if(i == is) {
-	    new_val += C_iter_old.get(i_loc+1,j,k)*(*coeffs)[ind][1] + 
-	    before.get(j,k)*(*coeffs)[ind][2];
-	  }
-	  else if(i == ie-1) {
-	    new_val += after.get(j,k)*(*coeffs)[ind][1] + 
-	    C_iter_old.get(i_loc-1,j,k)*(*coeffs)[ind][2];
-	  }
-	  else {
-	    new_val += C_iter_old.get(i_loc+1,j,k)*(*coeffs)[ind][1] + 
-	    C_iter_old.get(i_loc-1,j,k)*(*coeffs)[ind][2];
-	  }
-	    
-	  new_val += C_iter_old.get(i_loc,j+1,k) * (*coeffs)[ind][3] + 
-	             C_iter_old.get(i_loc,j-1,k) * (*coeffs)[ind][4] +
-	             C_iter_old.get(i_loc,j,k+1) * (*coeffs)[ind][5] + 
-	             C_iter_old.get(i_loc,j,k-1) * (*coeffs)[ind][6];
+                    if(i == is) {
+	                    new_val += C_iter_old[i_loc+1][j][k] * (*coeffs)[ind][1] + 
+	                        before[j][k] * (*coeffs)[ind][2];
+	                }
+	                else if(i == ie-1) {
+	                    new_val += after[j][k] * (*coeffs)[ind][1] + 
+	                        C_iter_old[i_loc-1][j][k] * (*coeffs)[ind][2];
+	                }
+	                else {
+	                    new_val += C_iter_old[i_loc+1][j][k] * (*coeffs)[ind][1] + 
+	                        C_iter_old[i_loc-1][j][k] * (*coeffs)[ind][2];
+	                }
+
+                    new_val += C_iter_old[i_loc][j+1][k] * (*coeffs)[ind][3] + 
+                                C_iter_old[i_loc][j-1][k] * (*coeffs)[ind][4] +
+                                C_iter_old[i_loc][j][k+1] * (*coeffs)[ind][5] + 
+                                C_iter_old[i_loc][j][k-1] * (*coeffs)[ind][6];
 	  
-          new_val += C_iter_old.get(i_loc,j,k) * (*coeffs)[ind][0] -
-                     C_iter_old.get(i_loc,j,k) * log( sqrt( pow(C_iter_old.get(i_loc,j,k),2) + eps ) ) 
-		     * (*coeffs)[ind][7];  	    
-		     
-          C_iter.set(i_loc,j,k,new_val);
-	      
+                    new_val += C_iter_old[i_loc][j][k] * (*coeffs)[ind][0] - 
+                        C_iter_old[i_loc][j][k] * log( sqrt( pow(C_iter_old[i_loc][j][k] , 2) + eps ) ) 
+                        * (*coeffs)[ind][7];  	    
 # else  
-	  /* version scalar */
+                    /* version scalar */
+                    new_val = ( solution[i][j][k] +
+                        C_iter_old[i+1][j][k] * (*coeffs)[ind][1] +
+                        C_iter_old[i-1][j][k] * (*coeffs)[ind][2] +
+                        C_iter_old[i][j+1][k] * (*coeffs)[ind][3] + 
+                        C_iter_old[i][j-1][k] * (*coeffs)[ind][4] +
+                        C_iter_old[i][j][k+1] * (*coeffs)[ind][5] + 
+                        C_iter_old[i][j][k-1] * (*coeffs)[ind][6] );
 
-	  new_val += C_iter_old.get(i+1,j,k) * (*coeffs)[ind][1] + 
-	             C_iter_old.get(i-1,j,k) * (*coeffs)[ind][2] + 
-	             C_iter_old.get(i,j+1,k) * (*coeffs)[ind][3] + 
-	             C_iter_old.get(i,j-1,k) * (*coeffs)[ind][4] +
-	             C_iter_old.get(i,j,k+1) * (*coeffs)[ind][5] + 
-	             C_iter_old.get(i,j,k-1) * (*coeffs)[ind][6];
-	  
-          new_val += C_iter_old.get(i,j,k) * (*coeffs)[ind][0] -
-                     C_iter_old.get(i,j,k) * log( sqrt( pow(C_iter_old.get(i,j,k),2) + eps ) ) 
-		     * (*coeffs)[ind][7];  	    
-
-          C_iter.set(i,j,k,new_val);
-
-# endif	    
-	  }
-	}
-      }
+                    new_val += C_iter_old[i][j][k] * (*coeffs)[ind][0] -
+                        C_iter_old[i][j][k] * log( sqrt( pow(C_iter_old[i][j][k], 2) + eps ) ) 
+                        * (*coeffs)[ind][7];    
+# endif
+                    /* update the matrix element with the new solution */
+                    C_iter[i_loc][j][k] = new_val;
+	            }
+	        }
+        }
     }
 
-    C->copy(&C_iter);
-    
-    return;
+    solution = C_iter;
 }
 
 
-void Solver::prepare_solution(const int task_id, const int num_tasks, 
-				   const int nx_local, const int ny, const int nz, 
-				   matrix3D *C, matrix2D *before, matrix2D *after) {
+void Solver::prepare_solution(const int task_id, const int num_tasks,
+				   boost_array3d_t& solution, boost_array2d_t& before, boost_array2d_t& after) {
 
 # if defined _MPI
   

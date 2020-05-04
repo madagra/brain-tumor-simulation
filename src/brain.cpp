@@ -150,35 +150,36 @@ void BrainModel::read()
    return coeffs;
  }
  
- double BrainModel::norm_tumor(const int is, const int ie, matrix3D *C) {
+ double BrainModel::norm_tumor(const int is, const int ie, boost_array3d_t& data) {
    
-   int i,j,k;
-   double init_value = Cm/2.0;
-   int i_start = tumor_position[0];
-   int j_start = tumor_position[1];
-   int k_start = tumor_position[2];
-   int dim     = tumor_size;
-   double radius = dim/2.0;
+    int i,j,k;
+    double init_value = Cm/2.0;
+    int i_start = tumor_position[0];
+    int j_start = tumor_position[1];
+    int k_start = tumor_position[2];
+    int dim     = tumor_size;
+    double radius = dim/2.0;
+    
+    double norm = 0.0;   
    
-   double norm = 0.0;   
-   
-   for(i = is; i < ie; i++) {
-     int i_loc = i - is;
-     for(j = j_start - radius ;j <= j_start + radius; j++) {
-       for(k = k_start - radius;k <= k_start + radius; k++) {
+    for(i = is; i < ie; i++) {
+        int i_loc = i - is;
+        for(j = j_start - radius ;j <= j_start + radius; j++) {
+            for(k = k_start - radius;k <= k_start + radius; k++) {
 
-	 double ix = (double) i-i_start;
-	 double iy = (double) j-j_start;
-         double iz = (double) k-k_start;
+                double ix = (double) i-i_start;
+                double iy = (double) j-j_start;
+                double iz = (double) k-k_start;
 
-	 if(i >= i_start - 2.0 && i <= i_start + 2.0) {     
+	            if(i >= i_start - 2.0 && i <= i_start + 2.0) {     
 	   	   
-	    if( sqrt( pow(ix,2) + pow(iy,2) + pow(iz,2) ) < 2.0 )
-	      norm += pow(C->get(i_loc,j,k),2);
-         }
-       }
-     }
-   }   
-   norm = sqrt(norm);
-   return norm; 
+	                if( sqrt( pow(ix,2) + pow(iy,2) + pow(iz,2) ) < 2.0 )
+	                    norm += pow(data[i_loc][j][k], 2);
+                }
+            }
+        }
+    }   
+    norm = sqrt(norm);
+    return norm;
+    
  }
